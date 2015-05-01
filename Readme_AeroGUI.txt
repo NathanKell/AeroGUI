@@ -3,7 +3,13 @@ Install: Drop the stuff in GameData into your GameData folder.
 Use:
 Press (mod) I (that's I as in India) during flight to show the GUI. Mod is Alt on PC, RShift on Linux, etc.
 
+v2:
+* Brought Mach/EAS/TV to top.
+* Added setttings file (set key, toggle keybind uses modifier key, toggle WinterOwlMode).
+* Added back thermal data window. Shows lots of useful stats, plus keeps a running count of convection.
 
+v1:
+Initial version. Shows aero stats.
 ******LICENSE********
 
 

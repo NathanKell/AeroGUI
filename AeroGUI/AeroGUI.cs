@@ -1,5 +1,5 @@
 ﻿/*by NathanKell
- * License: 
+ * License: MIT
  */
 using System;
 using System.Collections.Generic;
@@ -20,10 +20,19 @@ namespace KSPExp
         public static Rect windowPosThermal = new Rect(200, 200, 0, 0);
         public static bool guiEnabled = false;
         public KeyCode key = KeyCode.I;
+        public bool useModifier = true;
+        public bool winterOwlModeOff = true;
+
         public static bool showThermal = false;
 
-        // Solar bits
-        double scaleHeightMult, sunDot, latitudeDot, latTempMod, latTempMult, solarAMMult, sunTempMod, sunFinalMult, diurnalRange;
+        private const double bodyEmissiveScalarS0Front = 0.782048841d;
+        private const double bodyEmissiveScalarS0Back = 0.093081228d;
+        private const double bodyEmissiveScalarS1 = 0.87513007d;
+        private const double bodyEmissiveScalarS0Top = 0.398806364d;
+        private const double bodyEmissiveScalarS1Top = 0.797612728d;
+
+        // Thermal bits
+        double scaleHeightMult, solarFlux, backgroundRadTemp, bodyAlbedoFlux, bodyEmissiveFlux, bodySunFlux, effectiveFaceTemp, bodyTemperature, sunDot, atmosphereTemperatureOffset, altTempMult, latitude, latTempMod, axialTempMod, solarAMMult, finalAtmoMod, sunFinalMult, diurnalRange;
         bool inSun;
 
         // display forces
@@ -32,10 +41,29 @@ namespace KSPExp
         // thermal counter
         public double convectiveTotal = 0d;
 
+        // via regex
+        
+
         public void Start()
         {
             enabled = true;
             scaleHeightMult = -Math.Log(0.000001);
+            ConfigNode settings = null;
+            foreach (ConfigNode node in GameDatabase.Instance.GetConfigNodes("AEROGUI"))
+            {
+                settings = node;
+                break;
+            }
+            if (settings.HasValue("key"))
+                key = (KeyCode)Enum.Parse(typeof(KeyCode), settings.GetValue("key"));
+            if (settings.HasValue("useModifier"))
+                bool.TryParse(settings.GetValue("useModifier"), out useModifier);
+            if (settings.HasValue("WinterOwlMode"))
+            {
+                bool btmp;
+                if (bool.TryParse(settings.GetValue("WinterOwlMode"), out btmp))
+                    winterOwlModeOff = !btmp;
+            }
         }
 
         public void OnGUI()
@@ -61,7 +89,8 @@ namespace KSPExp
                 // clear values
                 terminalV = alpha = mach = thrust = soundSpeed = climbrate = eas = lift = drag = lidForce = dragUpForce = pLift = pDrag = liftUp = grav = ldRatio = Q = pressure = density = ambientTemp = shockTemp = 0;
                 // clear solar values
-                diurnalRange = sunDot = latitudeDot = latTempMod = latTempMult = solarAMMult = sunTempMod = sunFinalMult = 0;
+                solarFlux = bodyAlbedoFlux = bodyEmissiveFlux = bodySunFlux = effectiveFaceTemp = bodyTemperature = sunDot = atmosphereTemperatureOffset = altTempMult = latitude = latTempMod = axialTempMod = solarAMMult = finalAtmoMod = sunFinalMult = diurnalRange = 0d;
+                backgroundRadTemp = PhysicsGlobals.SpaceTemperature;
                 if ((object)FlightGlobals.ActiveVessel != null)
                 {
                     // get non-air-dependent stats
@@ -82,57 +111,190 @@ namespace KSPExp
                     if (FlightGlobals.ActiveVessel.atmDensity > 0) // if we have air, get aero stats
                         GetAeroStats(nVel);
 
-                    GetSunStats(v);
+                    GetThermalStats(v);
                 }
             }
         }
 
-        public void GetSunStats(Vessel vessel)
+        public void GetThermalStats(Vessel vessel)
         {
+            shockTemp = vessel.externalTemperature;
+            double densityThermalLerp = 1d - vessel.atmDensity;
+            if (densityThermalLerp < 0.5d)
+            {
+                densityThermalLerp = 0.25d / vessel.atmDensity;
+            }
+            backgroundRadTemp = UtilMath.Lerp(
+                vessel.externalTemperature,
+                PhysicsGlobals.SpaceTemperature,
+                densityThermalLerp);
+            // sun
             inSun = vessel.directSunlight;
             Vector3 sunVector = (FlightGlobals.Bodies[0].scaledBody.transform.position - ScaledSpace.LocalToScaledSpace(vessel.transform.position)).normalized;
-            sunDot = Vector3.Dot(sunVector, vessel.upAxis);
-            double depthFactor = 1.0;
-            solarAMMult = 1.0;
-            if (vessel.atmDensity > 0)
+            solarFlux = vessel.solarFlux;
+            if (FlightGlobals.Bodies[0] != vessel.mainBody)
             {
-                double radiusFactor = vessel.mainBody.Radius / vessel.mainBody.atmosphereDepth * scaleHeightMult;
-                double rcosz = radiusFactor * sunDot;
-                depthFactor = vessel.mainBody.GetSolarPowerFactor(vessel.atmDensity);
-                // alternative 1: absolute value
-                /*if(rcosz < 0)
-                {
-                    rcosz = -rcosz;
-                }
-                solarAMD = Math.Sqrt(rcosz * rcosz + 2 * radiusFactor + 1) - rcosz;*/
+                double sunDistanceSqr = ((FlightGlobals.Bodies[0].scaledBody.transform.position - vessel.mainBody.scaledBody.transform.position) * ScaledSpace.ScaleFactor).sqrMagnitude;
+                bodySunFlux = PhysicsGlobals.SolarLuminosity / (4d * Math.PI * sunDistanceSqr);
+                sunDot = Vector3.Dot(sunVector, vessel.upAxis);
+                Vector3 mainBodyUp = vessel.mainBody.bodyTransform.up;
+                float sunAxialDot = Vector3.Dot(sunVector, mainBodyUp);
+                double bodyPolarAngle = Math.Acos(Vector3.Dot(mainBodyUp, vessel.upAxis));
+                double sunPolarAngle = Math.Acos(sunAxialDot);
+                double sunBodyMaxDot = (1d + Math.Cos(sunPolarAngle - bodyPolarAngle)) * 0.5d;
+                double sunBodyMinDot = (1d + Math.Cos(sunPolarAngle + bodyPolarAngle)) * 0.5d;
 
-                // alternative 2: clamp
-                if (rcosz < 0)
-                    solarAMMult = 1 / Math.Sqrt(2 * radiusFactor + 1);
+                double fracBodyPolar = bodyPolarAngle;
+                double fracSunPolar = sunPolarAngle;
+
+                if (bodyPolarAngle > Math.PI * 0.5d)
+                {
+                    fracBodyPolar = Math.PI - fracBodyPolar;
+                    fracSunPolar = Math.PI - fracSunPolar;
+                }
+
+                double bodyDayFraction = (Math.PI * 0.5d + Math.Asin((Math.PI * 0.5d - fracSunPolar) / fracBodyPolar)) * (1d / Math.PI);
+                // correct sunDot based on the fact peak temp is ~3pm and min temp is ~3am, or so we will assume
+                double sunDotCorrected = (1d + Vector3.Dot(sunVector, Quaternion.AngleAxis(-45f * Mathf.Sign((float)vessel.mainBody.rotationPeriod), mainBodyUp) * vessel.upAxis)) * 0.5d;
+
+                // get normalized dot
+                double sunDotNormalized = (sunDotCorrected - sunBodyMinDot) / (sunBodyMaxDot - sunBodyMinDot);
+                if (double.IsNaN(sunDotNormalized))
+                {
+                    if (sunDotCorrected > 0.5d)
+                        sunDotNormalized = 1d;
+                    else
+                        sunDotNormalized = 0d;
+                }
+
+                // get latitude-based changes, if body has an atmosphere
+                if (vessel.mainBody.atmosphere)
+                {
+                    float latitude = (float)(Math.PI * 0.5d - fracBodyPolar);
+                    latitude *= Mathf.Rad2Deg;
+                    diurnalRange = vessel.mainBody.latitudeTemperatureSunMultCurve.Evaluate(latitude);
+                    latTempMod = vessel.mainBody.latitudeTemperatureBiasCurve.Evaluate(latitude);
+                    axialTempMod = vessel.mainBody.axialTemperatureSunMultCurve.Evaluate(sunAxialDot);
+                    atmosphereTemperatureOffset = latTempMod + diurnalRange * sunDotNormalized + axialTempMod;
+                    altTempMult = vessel.mainBody.atmosphereTemperatureSunMultCurve.Evaluate((float)vessel.altitude);
+
+                    // calculate air mass etc
+                    double depthFactor = 1.0;
+
+                    if (vessel.atmDensity > 0)
+                    {
+                        // get final temp mod
+                        finalAtmoMod = atmosphereTemperatureOffset * altTempMult;
+
+                        // get solar air stuff
+                        double rcosz = vessel.mainBody.radiusAtmoFactor * sunDot;
+                        depthFactor = vessel.mainBody.GetSolarPowerFactor(vessel.atmDensity);
+                        // alternative 1: absolute value
+                        /*if(rcosz < 0)
+                        {
+                            rcosz = -rcosz;
+                        }
+                        solarAMD = Math.Sqrt(rcosz * rcosz + 2 * radiusFactor + 1) - rcosz;*/
+
+                        // alternative 2: clamp
+                        if (rcosz < 0)
+                            solarAMMult = 1 / Math.Sqrt(2 * vessel.mainBody.radiusAtmoFactor + 1);
+                        else
+                            solarAMMult = 1 / (Math.Sqrt(rcosz * rcosz + 2 * vessel.mainBody.radiusAtmoFactor + 1) - rcosz);
+
+                        sunFinalMult = depthFactor * solarAMMult;
+
+
+                        // get hypersonic convective shock temp
+                        double machLerp = (vessel.mach - PhysicsGlobals.MachConvectionStart) / (PhysicsGlobals.MachConvectionEnd - PhysicsGlobals.MachConvectionStart);
+                        if (machLerp > 0)
+                        {
+                            machLerp = Math.Pow(machLerp, PhysicsGlobals.MachConvectionExponent);
+                            machLerp = Math.Min(1d, machLerp);
+                            double machExtTemp = Math.Pow(0.5d * vessel.convectiveMachFlux
+                                / (PhysicsGlobals.StefanBoltzmanConstant * PhysicsGlobals.RadiationFactor), 1d / PhysicsGlobals.PartEmissivityExponent);
+                            shockTemp = Math.Max(shockTemp, UtilMath.LerpUnclamped(shockTemp, machExtTemp, machLerp));
+                        }
+                    }
+                }
+
+                // now body properties
+                // Now calculate albedo and emissive fluxes, and body temperature under vessel
+                double nightTempScalar = 0d;
+                double bodyMinTemp = 0d;
+                double bodyMaxTemp = 0d;
+                if (vessel.mainBody.atmosphere)
+                {
+                    double baseTemp = vessel.mainBody.GetTemperature(0d);
+                    bodyTemperature = baseTemp + atmosphereTemperatureOffset;
+                    bodyMinTemp = baseTemp + (vessel.mainBody.latitudeTemperatureBiasCurve.Evaluate(90f) // no lat sun mult since night
+                        + vessel.mainBody.axialTemperatureSunMultCurve.Evaluate(-(float)vessel.mainBody.orbit.inclination));
+                    bodyMaxTemp = baseTemp + (vessel.mainBody.latitudeTemperatureBiasCurve.Evaluate(0f)
+                        + (vessel.mainBody.latitudeTemperatureSunMultCurve.Evaluate(0f))
+                        + vessel.mainBody.axialTemperatureSunMultCurve.Evaluate((float)vessel.mainBody.orbit.inclination));
+
+                    nightTempScalar = 1d - Math.Sqrt(bodyMaxTemp) * 0.0016d;
+                    nightTempScalar = UtilMath.Clamp01(nightTempScalar);
+                }
                 else
-                    solarAMMult = 1 / (Math.Sqrt(rcosz * rcosz + 2 * radiusFactor + 1) - rcosz);
-            }
-            sunFinalMult = depthFactor * solarAMMult;
-            latitudeDot = Math.Abs(Vector3.Dot(vessel.mainBody.bodyTransform.up, vessel.upAxis));
-            latTempMod = 15d - (75d * latitudeDot) * 0.5d; // extra 0.5 because dot never gets very high at the poles
-            latTempMult = (10d + 8d * latitudeDot);
-            sunTempMod = latTempMod + latTempMult * (1 + sunDot) * 0.5d; // normalized dot
-            double polarAng = Math.Acos(Vector3.Dot(vessel.mainBody.bodyTransform.up, vessel.upAxis));
-            if (polarAng < Math.PI * 0.5) // <90deg
-            {
-                double sunPoleAngle = Math.Acos(Vector3.Dot(vessel.mainBody.bodyTransform.up, sunVector));
-                double dayDot = (1 + Math.Cos(sunPoleAngle - polarAng)) * .5;
-                double nightDot = (1 + Math.Cos(sunPoleAngle + polarAng)) * .5;
-                diurnalRange = (dayDot - nightDot) * latTempMult;
-            }
-            else
-            {
-                double sunPoleAngle = Math.Acos(Vector3.Dot(-vessel.mainBody.bodyTransform.up, sunVector));
-                double dayDot = (1 + Math.Cos(sunPoleAngle - (Math.PI - polarAng))) * .5;
-                double nightDot = (1 + Math.Cos(sunPoleAngle + (Math.PI - polarAng))) * .5;
-                diurnalRange = (dayDot - nightDot) * latTempMult;
+                {
+                    double spaceTemp4 = PhysicsGlobals.SpaceTemperature;
+                    spaceTemp4 *= spaceTemp4;
+                    spaceTemp4 *= spaceTemp4;
+
+                    // now calculate two temperatures: the effective temp, and the maximum possible surface temperature
+                    double sbERecip = 1d / (PhysicsGlobals.StefanBoltzmanConstant * vessel.mainBody.emissivity);
+                    double tmp = bodySunFlux * (1d - vessel.mainBody.albedo) * sbERecip;
+                    double effectiveTemp = Math.Pow(0.25d * tmp + spaceTemp4, 0.25d);
+                    double fullSunTemp = Math.Pow(tmp + spaceTemp4, 0.25d);
+
+                    // now use some magic numbers to calculate minimum and maximum temperatures
+                    double tempOffset = fullSunTemp - effectiveTemp;
+                    bodyMaxTemp = effectiveTemp + Math.Sqrt(tempOffset) * 2d;
+                    bodyMinTemp = effectiveTemp - Math.Pow(tempOffset, 1.1d) * 1.22d;
+
+                    double lerpVal = 2d / Math.Sqrt(Math.Sqrt(vessel.mainBody.solarDayLength));
+                    bodyMaxTemp = UtilMath.Lerp(bodyMaxTemp, effectiveTemp, lerpVal);
+                    bodyMinTemp = UtilMath.Lerp(bodyMinTemp, effectiveTemp, lerpVal);
+
+                    double latitudeLerpVal = Math.Max(0d, sunBodyMaxDot * 2d - 1d);
+                    latitudeLerpVal = Math.Sqrt(latitudeLerpVal);
+                    nightTempScalar = 1d - Math.Sqrt(bodyMaxTemp) * 0.0016d;
+                    nightTempScalar = UtilMath.Clamp01(nightTempScalar);
+                    double tempDiff = (bodyMaxTemp - bodyMinTemp) * latitudeLerpVal;
+                    double dayTemp = bodyMinTemp + tempDiff;
+                    double nightTemp = bodyMinTemp + tempDiff * nightTempScalar;
+                    bodyTemperature = Math.Max(PhysicsGlobals.SpaceTemperature,
+                        nightTemp + (dayTemp - nightTemp) * sunDotNormalized + vessel.mainBody.coreTemperatureOffset);
+                }
+
+                // Quite a lerp. We need to get the lerp between front and back faces, then lerp between that and the top facing
+                effectiveFaceTemp = UtilMath.LerpUnclamped(
+                    UtilMath.LerpUnclamped( // horizontal component
+                        UtilMath.LerpUnclamped(bodyMinTemp, bodyMaxTemp, // front face
+                            UtilMath.LerpUnclamped(bodyEmissiveScalarS0Front, bodyEmissiveScalarS1, nightTempScalar)),
+                        UtilMath.LerpUnclamped(bodyMinTemp, bodyMaxTemp, // back face
+                            UtilMath.LerpUnclamped(bodyEmissiveScalarS0Back, bodyEmissiveScalarS1, nightTempScalar)),
+                        sunDotNormalized),
+                    UtilMath.LerpUnclamped(bodyMinTemp, bodyMaxTemp, UtilMath.LerpUnclamped(bodyEmissiveScalarS0Top, bodyEmissiveScalarS1Top, nightTempScalar)),
+                    sunBodyMaxDot);
+
+                double temp4 = UtilMath.Lerp(bodyTemperature, effectiveFaceTemp, 0.2d + vessel.altitude / vessel.mainBody.Radius * 0.5d);
+                temp4 *= temp4;
+                temp4 *= temp4;
+                double bodyFluxScalar = (4d * Math.PI * vessel.mainBody.Radius * vessel.mainBody.Radius)
+                    / (4d * Math.PI * (vessel.mainBody.Radius + vessel.altitude) * (vessel.mainBody.Radius + vessel.altitude));
+                bodyEmissiveFlux = PhysicsGlobals.StefanBoltzmanConstant * vessel.mainBody.emissivity * temp4 * bodyFluxScalar;
+                bodyAlbedoFlux = bodySunFlux * 0.5d * (sunDot + 1f) * vessel.mainBody.albedo * bodyFluxScalar;
+
+                // density lerps
+                bodyEmissiveFlux = UtilMath.Lerp(0d, bodyEmissiveFlux, densityThermalLerp);
+                bodyAlbedoFlux = UtilMath.Lerp(0d, bodyAlbedoFlux, densityThermalLerp);
             }
         }
+            
+
+            
 
         // This method will calculate various useful stats
         // That we display in the GUI.
@@ -233,42 +395,6 @@ namespace KSPExp
             // Now the basic craft stats
             // see above in the method where they are calculated for explanations.
 
-            tmp = (Q > 0d && Q < 0.1d) ? Q.ToString("E6") : Q.ToString("N1");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Dynamic Pressure: " + tmp + " Pa", labelStyle);
-            GUILayout.EndHorizontal();
-
-            tmp = (pressure > 0d && pressure < 0.1d) ? pressure.ToString("E6") : pressure.ToString("N1");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Static Pressure: " + tmp + " Pa", labelStyle);
-            GUILayout.EndHorizontal();
-
-            tmp = (density > 0d && density < 1e-5d) ? density.ToString("E6") : density.ToString("N6");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Density: " + tmp + " kg/m^3", labelStyle);
-            GUILayout.EndHorizontal();
-
-            double dSqrt = Math.Sqrt(density);
-            tmp = (dSqrt > 0d && dSqrt < 1e-5d) ? dSqrt.ToString("E6") : dSqrt.ToString("N6");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Density (Sqrt): " + tmp, labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Static Amb. Temp: " + ambientTemp.ToString("N2") + " K", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("External Temp: " + shockTemp.ToString("N2") + " K", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Speed of sound: " + soundSpeed.ToString("N2") + " m/s", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(" ------ ", labelStyle);
-            GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("Mach: " + mach.ToString("N3"), labelStyle);
@@ -282,61 +408,97 @@ namespace KSPExp
             GUILayout.Label("Terminal Vel (est): " + terminalV.ToString("N1") + " m/s", labelStyle);
             GUILayout.EndHorizontal();
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Climb rate: " + climbrate.ToString("N3") + " m/s", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label(" ------ ", labelStyle);
-            GUILayout.EndHorizontal();
-
-            // Now lift/drag related stats
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("AoA: " + alpha.ToString("N3") + " deg", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Sideslip: " + sideslip.ToString("N3") + " deg", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Total Lift: " + lift.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Total Drag: " + drag.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Lift / Drag Ratio: " + ldRatio.ToString("N3"), labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Thrust: " + thrust.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Grav Force (weight): " + grav.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Upwards Force: " + liftUp.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("L-I-D: " + lidForce.ToString("N3") + " kN", labelStyle);
-            GUILayout.EndHorizontal();
-
-            /*GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Thermal", buttonStyle))
+            if (winterOwlModeOff)
             {
-                showThermal = !showThermal;
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(" ------ ", labelStyle);
+                GUILayout.EndHorizontal();
+
+                tmp = (Q > 0d && Q < 0.1d) ? Q.ToString("E6") : Q.ToString("N1");
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Dynamic Pressure: " + tmp + " Pa", labelStyle);
+                GUILayout.EndHorizontal();
+
+                tmp = (pressure > 0d && pressure < 0.1d) ? pressure.ToString("E6") : pressure.ToString("N1");
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Static Pressure: " + tmp + " Pa", labelStyle);
+                GUILayout.EndHorizontal();
+
+                tmp = (density > 0d && density < 1e-5d) ? density.ToString("E6") : density.ToString("N6");
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Density: " + tmp + " kg/m^3", labelStyle);
+                GUILayout.EndHorizontal();
+
+                /*double dSqrt = Math.Sqrt(density);
+                tmp = (dSqrt > 0d && dSqrt < 1e-5d) ? dSqrt.ToString("E6") : dSqrt.ToString("N6");
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Density (Sqrt): " + tmp, labelStyle);
+                GUILayout.EndHorizontal();*/
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Static Amb. Temp: " + ambientTemp.ToString("N2") + " K", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("External Temp: " + shockTemp.ToString("N2") + " K", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Speed of sound: " + soundSpeed.ToString("N2") + " m/s", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(" ------ ", labelStyle);
+                GUILayout.EndHorizontal();
+
+                // Now lift/drag related stats
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("AoA: " + alpha.ToString("N3") + " deg", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Sideslip: " + sideslip.ToString("N3") + " deg", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Climb rate: " + climbrate.ToString("N3") + " m/s", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Total Lift: " + lift.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Total Drag: " + drag.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Lift / Drag Ratio: " + ldRatio.ToString("N3"), labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Thrust: " + thrust.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Grav Force (weight): " + grav.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Upwards Force: " + liftUp.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("L-I-D: " + lidForce.ToString("N3") + " kN", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Thermal", buttonStyle))
+                {
+                    showThermal = !showThermal;
+                }
+                GUILayout.EndHorizontal();
             }
-            if (GUILayout.Button("Reset Conv. Counter", buttonStyle))
-            {
-                convectiveTotal = 0d;
-            }
-            GUILayout.EndHorizontal();*/
 
             GUILayout.EndVertical();
             GUI.DragWindow();
@@ -365,7 +527,7 @@ namespace KSPExp
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("In Sunlight: " + inSun.ToString(), labelStyle);
+            GUILayout.Label("Solar Flux: " + (solarFlux * 0.001d).ToString("N3") + " kW", labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
@@ -377,15 +539,11 @@ namespace KSPExp
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Ext Temp Mod: " + sunTempMod.ToString("N2") + " K", labelStyle);
+            GUILayout.Label("Sun Incidence: " + sunDot.ToString("N4"), labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Sun Incidence" + sunDot.ToString("N4"), labelStyle);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Latitude: " + (Math.Asin(latitudeDot) * RAD2DEG).ToString("N3"), labelStyle);
+            GUILayout.Label("Latitude: " + latitude.ToString("N3"), labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
@@ -393,7 +551,7 @@ namespace KSPExp
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Diurnal Temp Mult: " + latTempMult.ToString("N2") + " K", labelStyle);
+            GUILayout.Label("Seasonal Temp Mod: " + axialTempMod.ToString("N2") + " K", labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
@@ -401,11 +559,46 @@ namespace KSPExp
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
+            GUILayout.Label("Alt Temp Offset Mult: " + altTempMult.ToString("N5"), labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Final Temp Mod: " + finalAtmoMod.ToString("N2") + " K", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
             GUILayout.Label(" ------ ", labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Heat Load: " + convectiveTotal + " kJ", labelStyle);
+            GUILayout.Label("Background Radiation Temp: " + backgroundRadTemp.ToString("N2") + " K", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Body Temp under craft: " + bodyTemperature .ToString("N2") + " K", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Effective Body Face Temp: " + effectiveFaceTemp.ToString("N2") + " K", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Body Radiation Flux: " + (bodyEmissiveFlux * 0.001d).ToString("N5") + " kW", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Body Albedo Flux: " + (bodyAlbedoFlux * 0.001d).ToString("N5") + " kW", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Convective Heat Load: " + convectiveTotal.ToString("N3") + " kJ", labelStyle);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Reset Conv. Counter", buttonStyle))
+            {
+                convectiveTotal = 0d;
+            }
             GUILayout.EndHorizontal();
 
 
