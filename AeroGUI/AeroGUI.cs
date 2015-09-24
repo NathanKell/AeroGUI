@@ -36,7 +36,7 @@ namespace KSPExp
         bool inSun;
 
         // display forces
-        public double terminalV, alpha, sideslip, soundSpeed, mach, eas, thrust, climbrate, lift, drag, lidForce, dragUpForce, pLift, pDrag, liftUp, grav, ldRatio, Q, pressure, density, ambientTemp, shockTemp;
+        public double terminalV, alpha, sideslip, soundSpeed, mach, eas, thrust, climbrate, lift, drag, lidForce, dragUpForce, pLift, pDrag, liftUp, grav, ldRatio, Q, pressure, density, ambientTemp, shockTemp, CdS, ClS, ballisticCoeff;
 
         // thermal counter
         public double convectiveTotal = 0d;
@@ -87,7 +87,7 @@ namespace KSPExp
             if (HighLogic.LoadedSceneIsFlight && guiEnabled)
             {
                 // clear values
-                terminalV = alpha = mach = thrust = soundSpeed = climbrate = eas = lift = drag = lidForce = dragUpForce = pLift = pDrag = liftUp = grav = ldRatio = Q = pressure = density = ambientTemp = shockTemp = 0;
+                terminalV = alpha = mach = thrust = soundSpeed = climbrate = eas = lift = drag = lidForce = dragUpForce = pLift = pDrag = liftUp = grav = ldRatio = Q = pressure = density = ambientTemp = shockTemp = ballisticCoeff = CdS = ClS = 0;
                 // clear solar values
                 solarFlux = bodyAlbedoFlux = bodyEmissiveFlux = bodySunFlux = effectiveFaceTemp = bodyTemperature = sunDot = atmosphereTemperatureOffset = altTempMult = latitude = latTempMod = axialTempMod = solarAMMult = finalAtmoMod = sunFinalMult = diurnalRange = 0d;
                 backgroundRadTemp = PhysicsGlobals.SpaceTemperature;
@@ -312,13 +312,13 @@ namespace KSPExp
             mach = v.rootPart.machNumber;
             soundSpeed = v.speedOfSound;
             double dTime = TimeWarp.fixedDeltaTime;
-
+            double mass = 0d;
             // Now we loop through all parts, checking the modules in each part
             // This way we get all drag, lift, and thrust.
             for (int i = 0; i < v.Parts.Count; ++i)
             {
                 Part p = v.Parts[i];
-
+                mass += p.mass + p.GetResourceMass();
                 // get part drag (but not wing/surface drag)
                 vDrag += -p.dragVectorDir * p.dragScalar;
                 if (!p.hasLiftModule)
@@ -365,6 +365,11 @@ namespace KSPExp
             terminalV = Math.Sqrt(grav / drag) * v.speed;
             if (double.IsNaN(terminalV))
                 terminalV = 0d;
+
+            double qRecip = 1000d / Q; // convert kN to Newtons
+            ClS = lift * qRecip;
+            CdS = drag * qRecip;
+            ballisticCoeff = 1000d * mass / CdS; // convert tonnes to kg
         }
 
 
@@ -477,6 +482,18 @@ namespace KSPExp
                 GUILayout.EndHorizontal();
 
                 GUILayout.BeginHorizontal();
+                GUILayout.Label("Cd * S: " + CdS.ToString("N3") + " m^2", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Cl * S: " + ClS.ToString("N3") + " m^2", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Ballistic Coeff: " + ballisticCoeff.ToString("N3") + " kg/m^2", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.BeginHorizontal();
                 GUILayout.Label("Thrust: " + thrust.ToString("N3") + " kN", labelStyle);
                 GUILayout.EndHorizontal();
 
@@ -491,6 +508,7 @@ namespace KSPExp
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("L-I-D: " + lidForce.ToString("N3") + " kN", labelStyle);
                 GUILayout.EndHorizontal();
+
 
                 GUILayout.BeginHorizontal();
                 if (GUILayout.Button("Thermal", buttonStyle))
