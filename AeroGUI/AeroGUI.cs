@@ -206,13 +206,13 @@ namespace KSPExp
 
 
                         // get hypersonic convective shock temp
-                        double machLerp = (vessel.mach - PhysicsGlobals.MachConvectionStart) / (PhysicsGlobals.MachConvectionEnd - PhysicsGlobals.MachConvectionStart);
+                        double machLerp = (vessel.mach - PhysicsGlobals.NewtonianMachTempLerpStartMach) / (PhysicsGlobals.NewtonianMachTempLerpEndMach - PhysicsGlobals.NewtonianMachTempLerpStartMach);
                         if (machLerp > 0)
                         {
-                            machLerp = Math.Pow(machLerp, PhysicsGlobals.MachConvectionExponent);
+                            machLerp = Math.Pow(machLerp, PhysicsGlobals.NewtonianMachTempLerpExponent);
                             machLerp = Math.Min(1d, machLerp);
                             double machExtTemp = Math.Pow(0.5d * vessel.convectiveMachFlux
-                                / (PhysicsGlobals.StefanBoltzmanConstant * PhysicsGlobals.RadiationFactor), 1d / PhysicsGlobals.PartEmissivityExponent);
+                                / (PhysicsGlobals.StefanBoltzmanConstant * PhysicsGlobals.RadiationFactor), 0.25d);
                             shockTemp = Math.Max(shockTemp, UtilMath.LerpUnclamped(shockTemp, machExtTemp, machLerp));
                         }
                     }
