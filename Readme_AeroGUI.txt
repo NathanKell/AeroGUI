@@ -3,6 +3,10 @@ Install: Drop the stuff in GameData into your GameData folder.
 Use:
 Press (mod) I (that's I as in India) during flight to show the GUI. Mod is Alt on PC, RShift on Linux, etc.
 
+v3:
+* Update for KSP 1.0.5.
+* Show Cd*S and Cl*S and ballistic coefficient for current attitude.
+
 v2:
 * Brought Mach/EAS/TV to top.
 * Added setttings file (set key, toggle keybind uses modifier key, toggle WinterOwlMode).
